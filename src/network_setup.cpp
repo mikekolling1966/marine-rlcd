@@ -384,9 +384,11 @@ void save_preferences(bool skip_screen_blobs = false) {
         preferences.putUShort("auto_scroll", auto_scroll_sec);
         preferences.putUShort("unit_system", (uint16_t)unit_system);
         preferences.putUShort(SCREEN_OFF_TIMEOUT_KEY, screen_off_timeout_min);
-        for (int i = 0; i < NUM_SCREENS * 2; ++i) {
-            String key = String("skpath_") + i;
-            preferences.putString(key.c_str(), signalk_paths[i]);
+        if (!skip_screen_blobs) {
+            for (int i = 0; i < NUM_SCREENS * 2; ++i) {
+                String key = String("skpath_") + i;
+                preferences.putString(key.c_str(), signalk_paths[i]);
+            }
         }
         preferences.end();
     }
@@ -680,7 +682,9 @@ void load_preferences() {
             preferences.end();
         }
     }
-    // Fill in any missing SignalK paths from SD fallback file (per-path, not all-or-nothing)
+    // Prefer Signal K paths from SD — SD is the authoritative save target.
+    // This intentionally overrides stale NVS skpath_* entries that may remain
+    // when the settings namespace runs out of free space.
     {
         const char *spfpath = "/config/signalk_paths.txt";
         if (SD_MMC.exists(spfpath)) {
@@ -690,9 +694,9 @@ void load_preferences() {
                 while (spf.available() && idx < NUM_SCREENS * 2) {
                     String line = spf.readStringUntil('\n');
                     line.trim();
-                    if (signalk_paths[idx].length() == 0 && line.length() > 0) {
+                    if (signalk_paths[idx] != line) {
                         signalk_paths[idx] = line;
-                        Serial.printf("[SD LOAD] Restored signalk_paths[%d] = '%s' from SD\n", idx, line.c_str());
+                        Serial.printf("[SD LOAD] Loaded signalk_paths[%d] = '%s' from SD\n", idx, line.c_str());
                     }
                     idx++;
                 }

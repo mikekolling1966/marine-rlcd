@@ -36,9 +36,11 @@ lv_obj_t *ui_BuzzerCooldownDrop = NULL;
 lv_obj_t *ui_BuzzerCooldownLabel = NULL;
 static lv_obj_t *ui_ScreenOffDrop = NULL;
 static lv_obj_t *ui_ScreenOffLabel = NULL;
+static lv_obj_t *ui_SettingsInstructionLabel = NULL;
 
 // Timer to periodically sync settings with values (in case web page changes them)
 static lv_timer_t *settings_refresh_timer = NULL;
+static int settings_button_focus_index = 0;
 
 // Global buzzer mode: 0 = Off, 1 = Global, 2 = Per-screen
 int buzzer_mode = 0;
@@ -49,6 +51,51 @@ uint8_t brightness_level = 0;
 static lv_obj_t *night_overlays[6] = {NULL}; // 0-4 = Screen1-5, 5 = Settings
 static lv_obj_t *ui_BrightnessDrop = NULL;
 static lv_obj_t *ui_BrightnessLevelLabel = NULL;
+
+static constexpr int kSettingsButtonControlCount = 5;
+
+static lv_obj_t *get_settings_button_control(int index) {
+    switch (index) {
+        case 0: return ui_BuzzerSwitch;
+        case 1: return ui_BuzzerCooldownDrop;
+        case 2: return ui_AutoScrollDrop;
+        case 3: return ui_ScreenOffDrop;
+        case 4: return ui_BrightnessDrop;
+        default: return NULL;
+    }
+}
+
+static const char *get_settings_button_control_name(int index) {
+    switch (index) {
+        case 0: return "Buzzer mode";
+        case 1: return "Buzzer pause";
+        case 2: return "Auto-scroll";
+        case 3: return "Screen sleep";
+        case 4: return "Brightness";
+        default: return "Setting";
+    }
+}
+
+static void refresh_settings_button_focus() {
+    for (int i = 0; i < kSettingsButtonControlCount; ++i) {
+        lv_obj_t *control = get_settings_button_control(i);
+        if (!control) continue;
+        const bool focused = (i == settings_button_focus_index);
+        lv_obj_set_style_outline_width(control, focused ? 3 : 0, 0);
+        lv_obj_set_style_outline_pad(control, focused ? 2 : 0, 0);
+        lv_obj_set_style_outline_color(control, lv_color_hex(0x3FA9F5), 0);
+        lv_obj_set_style_border_width(control, focused ? 2 : 1, 0);
+        lv_obj_set_style_border_color(control,
+                                      focused ? lv_color_hex(0x3FA9F5) : lv_color_hex(0x666666),
+                                      0);
+    }
+
+    if (ui_SettingsInstructionLabel) {
+        String text = "KEY: short next | hold change | double exit\nFocus: ";
+        text += get_settings_button_control_name(settings_button_focus_index);
+        lv_label_set_text(ui_SettingsInstructionLabel, text.c_str());
+    }
+}
 
 
 // Buzzer alert function.
@@ -194,6 +241,7 @@ extern "C" void update_settings_values(void)
         lv_dropdown_set_selected(ui_ScreenOffDrop, sel);
     }
 
+    refresh_settings_button_focus();
 
 }
 
@@ -201,6 +249,53 @@ extern "C" void update_settings_values(void)
 static void back_button_event_cb(lv_event_t *e)
 {
     lv_scr_load_anim(ui_Screen1, LV_SCR_LOAD_ANIM_MOVE_TOP, 300, 0, false);
+}
+
+extern "C" void settings_key_open(void)
+{
+    if (!ui_Settings) return;
+    previous_screen_before_settings = ui_get_current_screen();
+    settings_button_focus_index = 0;
+    refresh_settings_button_focus();
+    lv_scr_load_anim(ui_Settings, LV_SCR_LOAD_ANIM_MOVE_BOTTOM, 300, 0, false);
+}
+
+extern "C" void settings_key_exit(void)
+{
+    lv_obj_t* target_screen = ui_Screen1;
+    switch(previous_screen_before_settings) {
+        case 1: target_screen = ui_Screen1; break;
+        case 2: target_screen = ui_Screen2; break;
+        case 3: target_screen = ui_Screen3; break;
+        case 4: target_screen = ui_Screen4; break;
+        case 5: target_screen = ui_Screen5; break;
+    }
+    lv_scr_load_anim(target_screen, LV_SCR_LOAD_ANIM_MOVE_TOP, 300, 0, false);
+}
+
+extern "C" void settings_key_focus_next(void)
+{
+    settings_button_focus_index = (settings_button_focus_index + 1) % kSettingsButtonControlCount;
+    refresh_settings_button_focus();
+    Serial.printf("[KEY] Settings focus -> %s\n",
+                  get_settings_button_control_name(settings_button_focus_index));
+}
+
+extern "C" void settings_key_activate_focused(void)
+{
+    lv_obj_t *control = get_settings_button_control(settings_button_focus_index);
+    if (!control) return;
+
+    uint16_t option_count = lv_dropdown_get_option_cnt(control);
+    if (option_count == 0) return;
+
+    uint16_t selected = lv_dropdown_get_selected(control);
+    selected = (uint16_t)((selected + 1) % option_count);
+    lv_dropdown_set_selected(control, selected);
+    lv_event_send(control, LV_EVENT_VALUE_CHANGED, NULL);
+    refresh_settings_button_focus();
+    Serial.printf("[KEY] Settings change -> %s\n",
+                  get_settings_button_control_name(settings_button_focus_index));
 }
 
 // Event handler for swipe up gesture - manual detection
@@ -231,16 +326,7 @@ static void swipe_up_event_cb(lv_event_t *e)
         // Check for upward swipe (delta_y < -50 and mostly vertical)
         if (delta_y < -50 && abs(delta_y) > abs(delta_x)) {
             printf("SWIPE UP DETECTED - Returning to screen %d\n", previous_screen_before_settings);
-            // Return to the screen that was active before settings opened
-            lv_obj_t* target_screen = ui_Screen1;  // Default to Screen1
-            switch(previous_screen_before_settings) {
-                case 1: target_screen = ui_Screen1; break;
-                case 2: target_screen = ui_Screen2; break;
-                case 3: target_screen = ui_Screen3; break;
-                case 4: target_screen = ui_Screen4; break;
-                case 5: target_screen = ui_Screen5; break;
-            }
-            lv_scr_load_anim(target_screen, LV_SCR_LOAD_ANIM_MOVE_TOP, 300, 0, false);
+            settings_key_exit();
         }
         
         settings_swipe_in_progress = false;
@@ -339,6 +425,8 @@ extern "C" void ui_Settings_screen_init(void)
     // Update all settings values when screen loads (to sync with any web changes)
     lv_obj_add_event_cb(ui_Settings, [](lv_event_t *e) {
         update_settings_values();
+        settings_button_focus_index = 0;
+        refresh_settings_button_focus();
         // Start periodic refresh timer (every 2 seconds) while Settings screen is visible
         if (settings_refresh_timer == NULL) {
             settings_refresh_timer = lv_timer_create([](lv_timer_t *t) {
@@ -353,6 +441,7 @@ extern "C" void ui_Settings_screen_init(void)
             lv_timer_del(settings_refresh_timer);
             settings_refresh_timer = NULL;
         }
+        refresh_settings_button_focus();
     }, LV_EVENT_SCREEN_UNLOADED, NULL);
     
     printf("Settings swipe events registered\n");
@@ -623,12 +712,14 @@ extern "C" void ui_Settings_screen_init(void)
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // Instruction text
-    lv_obj_t *instruction = lv_label_create(ui_SettingsPanel);
-    lv_label_set_text(instruction, "Swipe up to return");
-    lv_obj_set_style_text_color(instruction, lv_color_hex(0x808080), 0);
-    lv_obj_set_x(instruction, 0);
-    lv_obj_set_y(instruction, 170);
-    lv_obj_set_align(instruction, LV_ALIGN_CENTER);
+    ui_SettingsInstructionLabel = lv_label_create(ui_SettingsPanel);
+    lv_label_set_text(ui_SettingsInstructionLabel, "KEY: short next | hold change | double exit");
+    lv_obj_set_style_text_color(ui_SettingsInstructionLabel, lv_color_hex(0x808080), 0);
+    lv_obj_set_style_text_align(ui_SettingsInstructionLabel, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(ui_SettingsInstructionLabel, 360);
+    lv_obj_set_x(ui_SettingsInstructionLabel, 0);
+    lv_obj_set_y(ui_SettingsInstructionLabel, 175);
+    lv_obj_set_align(ui_SettingsInstructionLabel, LV_ALIGN_CENTER);
 
     // Set current selection from persisted value
     extern uint16_t auto_scroll_sec;
@@ -637,4 +728,5 @@ extern "C" void ui_Settings_screen_init(void)
     else if (auto_scroll_sec == 10) sel = 2;
     else if (auto_scroll_sec == 30) sel = 3;
     lv_dropdown_set_selected(ui_AutoScrollDrop, sel);
+    refresh_settings_button_focus();
 }

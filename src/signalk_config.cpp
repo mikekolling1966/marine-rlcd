@@ -194,6 +194,54 @@ static String build_signalk_url(const String &path) {
     return String("/signalk/v1/api/vessels/self/") + cleaned;
 }
 
+static void store_sensor_value_for_path(const String& path, float value) {
+    bool found_in_gauge = false;
+    for (int i = 0; i < TOTAL_PARAMS; i++) {
+        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
+            set_sensor_value(i, value);
+            found_in_gauge = true;
+        }
+    }
+
+    if (!found_in_gauge && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
+        extended_sensor_values[path] = value;
+        xSemaphoreGive(sensor_mutex);
+    }
+}
+
+static void fetch_current_value_for_path(const String& path) {
+    if (path.length() == 0) return;
+
+    HTTPClient http;
+    String url = "http://" + server_ip_str + ":" + String(server_port_num) + build_signalk_url(path);
+
+    esp_task_wdt_reset();
+    http.begin(url);
+    http.setTimeout(1500);
+    int httpCode = http.GET();
+
+    if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        JsonDocument doc(psram_json_allocator());
+        DeserializationError err = deserializeJson(doc, payload);
+        if (!err && !doc["value"].isNull()) {
+            store_sensor_value_for_path(path, doc["value"].as<float>());
+        }
+    }
+
+    http.end();
+}
+
+static void fetch_current_values_for_paths(const std::vector<String>& paths) {
+    std::set<String> seen;
+    for (const String& path : paths) {
+        if (path.length() == 0 || seen.find(path) != seen.end()) continue;
+        seen.insert(path);
+        fetch_current_value_for_path(path);
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+}
+
 // Thread-safe getter for any sensor value
 float get_sensor_value(int index) {
     if (index < 0 || index >= TOTAL_PARAMS) return 0;
@@ -462,6 +510,9 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
         ws_client.sendTXT(out);
         // flush any queued outgoing messages (resubscribe, etc)
         flush_outgoing();
+        // Pull one snapshot for the active paths so a newly changed path doesn't
+        // keep showing the previously cached value until its next delta arrives.
+        fetch_current_values_for_paths(all_conn_paths);
         
         return;
     }
@@ -524,21 +575,7 @@ static void wsEvent(WStype_t type, uint8_t * payload, size_t length) {
 
                     float value = val["value"].as<float>();
 
-                    // Check if this path matches any gauge path
-                    bool found_in_gauge = false;
-                    for (int i = 0; i < TOTAL_PARAMS; i++) {
-                        if (signalk_paths[i].length() > 0 && signalk_paths[i].equals(path)) {
-                            set_sensor_value(i, value);
-                            found_in_gauge = true;
-                            // Don't break - continue to update ALL matching path indices
-                        }
-                    }
-                    
-                    // If not in gauge paths, store in extended map (for number/dual displays)
-                    if (!found_in_gauge && sensor_mutex != NULL && xSemaphoreTake(sensor_mutex, pdMS_TO_TICKS(50))) {
-                        extended_sensor_values[String(path)] = value;
-                        xSemaphoreGive(sensor_mutex);
-                    }
+                    store_sensor_value_for_path(String(path), value);
                 }
             }
         }

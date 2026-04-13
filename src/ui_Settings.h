@@ -31,6 +31,10 @@ void update_ip_address(void);
 void trigger_buzzer_alert(void);
 void night_mode_init_overlays(void);
 void set_brightness_level(uint8_t level);
+void settings_key_open(void);
+void settings_key_exit(void);
+void settings_key_focus_next(void);
+void settings_key_activate_focused(void);
 
 #ifdef __cplusplus
 }

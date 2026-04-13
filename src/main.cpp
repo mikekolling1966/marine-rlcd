@@ -53,6 +53,11 @@ bool apply_screen_visuals_for_one(int s);
 bool     g_screen_is_off      = false;
 uint32_t g_last_activity_ms   = 0;   // updated on touch; also used by LVGL_Driver
 
+static constexpr int kKeyButtonGpio = 18;
+static constexpr uint32_t kKeyButtonDebounceMs = 30;
+static constexpr uint32_t kKeyButtonLongPressMs = 700;
+static constexpr uint32_t kKeyButtonDoublePressMs = 350;
+
 // Animation state tracking
 static int16_t current_needle_angle = 0;
 static int16_t current_lower_needle_angle = 0;
@@ -990,6 +995,120 @@ void test_move_gauge(int screen, int gauge, int angle) {
 // even when Serial uses USB-OTG CDC (ARDUINO_USB_CDC_ON_BOOT=1).
 extern "C" int ets_printf(const char *fmt, ...);
 
+static void wake_display_from_activity(const char *source) {
+    g_screen_is_off = false;
+    g_last_activity_ms = millis();
+    WiFi.setSleep(false);
+    Set_Backlight(LCD_Backlight > 0 ? LCD_Backlight : 100);
+    Serial.printf("[SCREEN] Woke from %s\n", source);
+}
+
+static void handle_key_short_press() {
+    if (g_screen_is_off) {
+        wake_display_from_activity("KEY short");
+        return;
+    }
+
+    g_last_activity_ms = millis();
+    if (lv_scr_act() == ui_Settings) {
+        settings_key_focus_next();
+        return;
+    }
+
+    const int current_screen = ui_get_current_screen();
+    ui_next_screen();
+    Serial.printf("[KEY] Screen %d -> next\n", current_screen);
+}
+
+static void handle_key_long_press() {
+    if (g_screen_is_off) {
+        wake_display_from_activity("KEY hold");
+        return;
+    }
+
+    g_last_activity_ms = millis();
+    if (lv_scr_act() == ui_Settings) {
+        settings_key_activate_focused();
+        return;
+    }
+
+    const int current_screen = ui_get_current_screen();
+    ui_prev_screen();
+    Serial.printf("[KEY] Screen %d -> previous\n", current_screen);
+}
+
+static void handle_key_double_press() {
+    if (g_screen_is_off) {
+        wake_display_from_activity("KEY double");
+        return;
+    }
+
+    g_last_activity_ms = millis();
+    if (lv_scr_act() == ui_Settings) {
+        settings_key_exit();
+        Serial.println("[KEY] Exit settings");
+        return;
+    }
+
+    settings_key_open();
+    Serial.println("[KEY] Open settings");
+}
+
+static void handle_key_button() {
+    static bool last_raw_pressed = false;
+    static bool stable_pressed = false;
+    static uint32_t last_change_ms = 0;
+    static uint32_t press_start_ms = 0;
+    static bool long_press_handled = false;
+    static bool short_press_pending = false;
+    static uint32_t short_press_deadline_ms = 0;
+
+    const bool raw_pressed = (digitalRead(kKeyButtonGpio) == LOW);
+    const uint32_t now_ms = millis();
+
+    if (raw_pressed != last_raw_pressed) {
+        last_raw_pressed = raw_pressed;
+        last_change_ms = now_ms;
+    }
+
+    if ((now_ms - last_change_ms) < kKeyButtonDebounceMs) {
+        return;
+    }
+
+    if (raw_pressed == stable_pressed) {
+        if (stable_pressed && !long_press_handled &&
+            (now_ms - press_start_ms >= kKeyButtonLongPressMs)) {
+            long_press_handled = true;
+            short_press_pending = false;
+            handle_key_long_press();
+        } else if (!stable_pressed && short_press_pending &&
+                   (int32_t)(now_ms - short_press_deadline_ms) >= 0) {
+            short_press_pending = false;
+            handle_key_short_press();
+        }
+        return;
+    }
+
+    stable_pressed = raw_pressed;
+    if (stable_pressed) {
+        press_start_ms = now_ms;
+        long_press_handled = false;
+        return;
+    }
+
+    if (long_press_handled) {
+        return;
+    }
+
+    if (short_press_pending && (int32_t)(short_press_deadline_ms - now_ms) > 0) {
+        short_press_pending = false;
+        handle_key_double_press();
+    } else {
+        short_press_pending = true;
+        short_press_deadline_ms = now_ms + kKeyButtonDoublePressMs;
+    }
+}
+
 void setup() {
     // Immediate hardware UART0 marker - visible on CH343 even before USB CDC comes up
     ets_printf("\r\n\r\n*** SETUP() START ***\r\n");
@@ -1028,6 +1147,10 @@ void setup() {
     ets_printf("*** Serial.begin done ***\r\n");
     Serial.println("\n\n=== ESP32 Square Display Starting ===");
     Serial.printf("Firmware version: %s\n", FW_VERSION);
+    Serial.flush();
+
+    pinMode(kKeyButtonGpio, INPUT_PULLUP);
+    Serial.printf("[KEY] GPIO%d configured for screen advance\n", kKeyButtonGpio);
     Serial.flush();
 
     // Explicitly init NVS — the Arduino framework does this too, but repeat here
@@ -1243,6 +1366,7 @@ void setup() {
 
 void loop() {
     config_server.handleClient();
+    handle_key_button();
 
     // --- Screen-off timeout ---------------------------------------------------
     // g_last_activity_ms is updated on every touch in Lvgl_Touchpad_Read().
