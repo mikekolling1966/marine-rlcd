@@ -77,16 +77,16 @@ static ArduinoJson::Allocator* psram_json_allocator() {
 
 // Global array to hold all sensor values (10 parameters)
 float g_sensor_values[TOTAL_PARAMS] = {
-    0,        // SCREEN1_RPM
-    313.15,   // SCREEN1_COOLANT_TEMP
-    0,        // SCREEN2_RPM
-    50.0,     // SCREEN2_FUEL
-    313.15,   // SCREEN3_COOLANT_TEMP
-    373.15,   // SCREEN3_EXHAUST_TEMP
-    50.0,     // SCREEN4_FUEL
-    313.15,   // SCREEN4_COOLANT_TEMP
-    2.0,      // SCREEN5_OIL_PRESSURE
-    313.15    // SCREEN5_COOLANT_TEMP
+    NAN,      // SCREEN1_RPM
+    NAN,      // SCREEN1_COOLANT_TEMP
+    NAN,      // SCREEN2_RPM
+    NAN,      // SCREEN2_FUEL
+    NAN,      // SCREEN3_COOLANT_TEMP
+    NAN,      // SCREEN3_EXHAUST_TEMP
+    NAN,      // SCREEN4_FUEL
+    NAN,      // SCREEN4_COOLANT_TEMP
+    NAN,      // SCREEN5_OIL_PRESSURE
+    NAN       // SCREEN5_COOLANT_TEMP
 };
 
 // Mutex for thread-safe access to sensor variables
@@ -909,6 +909,14 @@ void subscribe_to_active_screen(int screen_1based) {
     Serial.printf("[SK] Subscribed to %d paths for screen %d\n", (int)paths.size(), screen_1based);
     if (paths.empty()) {
         Serial.println("[SK] No Signal K paths configured yet");
+        return;
+    }
+
+    // Also pull a current snapshot for the newly active screen so the UI
+    // doesn't sit on stale startup defaults until the next delta happens to
+    // arrive from Signal K.
+    if (WiFi.status() == WL_CONNECTED && server_ip_str.length() > 0 && server_port_num != 0) {
+        fetch_current_values_for_paths(paths);
     }
 }
 
@@ -953,4 +961,8 @@ void refresh_signalk_subscriptions() {
     // from two cores simultaneously is an unprotected race that crashes the device.
     // flush_outgoing() inside signalk_task will drain the queue safely from Core 0.
     enqueue_outgoing(out);
+
+    if (!all_paths.empty() && WiFi.status() == WL_CONNECTED && server_ip_str.length() > 0 && server_port_num != 0) {
+        fetch_current_values_for_paths(all_paths);
+    }
 }

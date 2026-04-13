@@ -47,18 +47,32 @@ static bool uses_feet() {
 
 // Infer SI unit from SignalK path when metadata hasn't arrived yet
 String infer_unit_from_path(const String& path) {
-    if (path.indexOf("temperature") >= 0 || path.indexOf("Temperature") >= 0) return "K";
-    if (path.indexOf("pressure") >= 0 || path.indexOf("Pressure") >= 0)       return "Pa";
-    if (path.indexOf("revolutions") >= 0)                                       return "Hz";
-    if (path.indexOf("currentLevel") >= 0 || path.indexOf("capacity") >= 0)    return "ratio";
-    if (path.indexOf("speed") >= 0 || path.indexOf("Speed") >= 0)             return "m/s";
-    if (path.indexOf("heading") >= 0 || path.indexOf("bearing") >= 0 ||
-        path.indexOf("course") >= 0 || path.indexOf("angle") >= 0 ||
-        path.indexOf("Heading") >= 0 || path.indexOf("Course") >= 0)          return "rad";
-    if (path.indexOf("volume") >= 0)                                            return "m3";
-    if (path.indexOf("depth") >= 0 || path.indexOf("draft") >= 0 ||
-        path.indexOf("length") >= 0 || path.indexOf("beam") >= 0 ||
-        path.indexOf("height") >= 0)                                              return "m";
+    String lower = path;
+    lower.toLowerCase();
+
+    // Prefer explicit derived-unit suffixes first so already-converted Signal K
+    // paths like `*.celsius` or `*.bar` are not treated as raw SI values again.
+    if (lower.endsWith(".celsius"))     return "C";
+    if (lower.endsWith(".fahrenheit"))  return "F";
+    if (lower.endsWith(".kelvin"))      return "K";
+    if (lower.endsWith(".bar"))         return "bar";
+    if (lower.endsWith(".mbar"))        return "mbar";
+    if (lower.endsWith(".psi"))         return "PSI";
+    if (lower.endsWith(".kpa"))         return "kPa";
+    if (lower.endsWith(".knots"))       return "kn";
+    if (lower.endsWith(".degrees"))     return String("\xC2\xB0");
+
+    if (lower.indexOf("temperature") >= 0) return "K";
+    if (lower.indexOf("pressure") >= 0)    return "Pa";
+    if (lower.indexOf("revolutions") >= 0) return "Hz";
+    if (lower.indexOf("currentlevel") >= 0 || lower.indexOf("capacity") >= 0) return "ratio";
+    if (lower.indexOf("speed") >= 0)       return "m/s";
+    if (lower.indexOf("heading") >= 0 || lower.indexOf("bearing") >= 0 ||
+        lower.indexOf("course") >= 0 || lower.indexOf("angle") >= 0)          return "rad";
+    if (lower.indexOf("volume") >= 0)      return "m3";
+    if (lower.indexOf("depth") >= 0 || lower.indexOf("draft") >= 0 ||
+        lower.indexOf("length") >= 0 || lower.indexOf("beam") >= 0 ||
+        lower.indexOf("height") >= 0)      return "m";
     return "";
 }
 
