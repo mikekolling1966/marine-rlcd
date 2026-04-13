@@ -27,5 +27,9 @@ void apply_needle_style_to_obj(lv_obj_t* obj, int screen, int gauge);
 // Apply styles to all needle objects (ui_Needle, ui_Needle2, ...)
 void apply_all_needle_styles();
 
-// Persist settings via Preferences (namespace "settings") - helpers used by WebUI
+// Recompute the line endpoints for all needles using their current cached angles.
+void refresh_all_needle_positions();
+void refresh_needle_position(int screen, int gauge);
+
+// Persist settings via SD-backed cache - helpers used by WebUI
 void save_needle_style_from_args(int screen, int gauge, const String& color, uint16_t width, int16_t inner, int16_t outer, uint16_t cx, uint16_t cy, bool rounded, bool gradient, bool fg);

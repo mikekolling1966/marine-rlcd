@@ -279,6 +279,26 @@ unsigned long g_config_page_last_seen = 0;
 static std::vector<String> g_iconFiles;
 static std::vector<String> g_bgFiles;
 
+static bool ensure_assets_dir() {
+    if (SD_MMC.exists("/assets")) {
+        return true;
+    }
+    if (SD_MMC.mkdir("/assets")) {
+        Serial.println("[ASSETS] Created /assets directory");
+        return true;
+    }
+    struct stat st;
+    if (stat("/sdcard/assets", &st) == 0 && S_ISDIR(st.st_mode)) {
+        return true;
+    }
+    if (mkdir("/sdcard/assets", 0777) == 0) {
+        Serial.println("[ASSETS] Created /sdcard/assets directory");
+        return true;
+    }
+    Serial.println("[ASSETS] Failed to create assets directory");
+    return false;
+}
+
 // Single shared HTML buffer for handle_gauges_page() and handle_gauges_screen().
 // Reserved at 8192 to exceed CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (4096),
 // forcing the backing store into PSRAM and freeing ~8 KB of internal RAM.
@@ -288,6 +308,7 @@ bool   g_http_html_buf_reserved = false;
 static void scan_sd_assets() {
     g_iconFiles.clear();
     g_bgFiles.clear();
+    ensure_assets_dir();
     File root = SD_MMC.open("/assets");
     if (root && root.isDirectory()) {
         File file = root.openNextFile();
@@ -2393,20 +2414,31 @@ void handle_needles_page() {
     if (gauge < 0) gauge = 0; if (gauge > 1) gauge = 0;
     NeedleStyle s = get_needle_style(screen, gauge);
 
+    config_server.sendHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    config_server.sendHeader("Pragma", "no-cache");
+    config_server.sendHeader("Expires", "0");
+
     String html = "<html><head>";
     html += STYLE;
     html += "<title>Needle Styles</title></head><body><div class='container'>";
     html += "<div class='tab-content'>";
     html += "<h2>Needle Styles</h2>";
-    html += "<form method='POST' action='/save-needles'>";
+    html += "<script>"
+            "function reloadNeedleEditor(){"
+            "var s=document.querySelector(\"select[name='screen']\").value;"
+            "var g=document.querySelector(\"select[name='gauge']\").value;"
+            "window.location='/needles?screen='+encodeURIComponent(s)+'&gauge='+encodeURIComponent(g);"
+            "}"
+            "</script>";
+    html += "<form method='POST' action='/save-needles' autocomplete='off'>";
     // Screen/gauge selectors
-    html += "<div class='form-row'><label>Screen:</label><select name='screen'>";
+    html += "<div class='form-row'><label>Screen:</label><select name='screen' onchange='reloadNeedleEditor()'>";
     for (int i = 0; i < NUM_SCREENS; ++i) {
         // keep option value 0-based for backend, show 1-based to user
         html += "<option value='" + String(i) + "'" + String(i==screen?" selected":"") + ">" + String(i+1) + "</option>";
     }
     html += "</select></div>";
-    html += "<div class='form-row'><label>Gauge:</label><select name='gauge'>";
+    html += "<div class='form-row'><label>Gauge:</label><select name='gauge' onchange='reloadNeedleEditor()'>";
     html += "<option value='0'" + String(gauge==0?" selected":"") + ">Top</option>";
     html += "<option value='1'" + String(gauge==1?" selected":"") + ">Bottom</option>";
     html += "</select></div>";
@@ -2461,6 +2493,7 @@ void handle_save_needles() {
 
     // Apply immediately
     apply_all_needle_styles();
+    refresh_needle_position(screen, gauge);
 
     // Redirect back to needles page for the same screen/gauge
     String redirect = "/needles?screen=" + String(screen) + "&gauge=" + String(gauge);
@@ -2856,7 +2889,7 @@ void handle_assets_page() {
     html += "<h2>Assets Manager</h2>";
     // Upload form (styled)
     html += "<div class='assets-uploader'><form method='POST' action='/assets/upload' enctype='multipart/form-data' style='display:flex;gap:8px;align-items:center;'>";
-    html += "<input type='file' name='file' accept='image/png,image/jpeg,image/bmp,image/gif'>";
+    html += "<input type='file' name='file' accept='.png,.bin,image/png,image/jpeg,image/bmp,image/gif'>";
     html += "<input type='submit' value='Upload' class='tab-btn'>";
     html += "</form></div>";
     flush();
@@ -2888,13 +2921,37 @@ void handle_assets_page() {
 static File assets_upload_file;
 // POSIX FILE* fallback when `SD_MMC.open` cannot open the desired path
 static FILE *assets_upload_fp = NULL;
+static bool assets_upload_ok = false;
+static String assets_upload_error;
+static String assets_upload_filename;
 void handle_assets_upload() {
     HTTPUpload& upload = config_server.upload();
     if (upload.status == UPLOAD_FILE_START) {
+        assets_upload_ok = false;
+        assets_upload_error = "";
+        assets_upload_filename = "";
+        assets_upload_file = File();
+        if (assets_upload_fp) {
+            fclose(assets_upload_fp);
+            assets_upload_fp = NULL;
+        }
         String filename = upload.filename;
         // sanitize filename: remove paths
         int slash = filename.lastIndexOf('/');
         if (slash >= 0) filename = filename.substring(slash + 1);
+        slash = filename.lastIndexOf('\\');
+        if (slash >= 0) filename = filename.substring(slash + 1);
+        assets_upload_filename = filename;
+        if (filename.length() == 0 || filename.indexOf("..") != -1) {
+            assets_upload_error = "Invalid filename";
+            Serial.printf("[ASSETS] Upload rejected: %s\n", assets_upload_error.c_str());
+            return;
+        }
+        if (!ensure_assets_dir()) {
+            assets_upload_error = "Assets folder is unavailable on SD card";
+            Serial.printf("[ASSETS] Upload rejected: %s\n", assets_upload_error.c_str());
+            return;
+        }
         String path = String("/assets/") + filename;
         Serial.printf("[ASSETS] Upload start: %s -> %s\n", upload.filename.c_str(), path.c_str());
         // open file for write (overwrite)
@@ -2906,15 +2963,21 @@ void handle_assets_upload() {
             assets_upload_fp = fopen(alt.c_str(), "wb");
             if (!assets_upload_fp) {
                 Serial.printf("[ASSETS] POSIX fopen fallback failed for %s\n", alt.c_str());
+                assets_upload_error = "Could not open destination file on SD card";
             } else {
                 Serial.printf("[ASSETS] POSIX fopen fallback opened %s\n", alt.c_str());
+                assets_upload_ok = true;
             }
+        } else {
+            assets_upload_ok = true;
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (assets_upload_file) {
             assets_upload_file.write(upload.buf, upload.currentSize);
         } else if (assets_upload_fp) {
             fwrite(upload.buf, 1, upload.currentSize, assets_upload_fp);
+        } else if (assets_upload_error.length() == 0) {
+            assets_upload_error = "Upload stream had no open destination";
         }
     } else if (upload.status == UPLOAD_FILE_END) {
         if (assets_upload_file) {
@@ -2925,6 +2988,8 @@ void handle_assets_upload() {
             fclose(assets_upload_fp);
             assets_upload_fp = NULL;
             Serial.printf("[ASSETS] Upload finished (POSIX fallback): %s (%u bytes)\n", upload.filename.c_str(), (unsigned)upload.totalSize);
+        } else if (assets_upload_error.length() == 0) {
+            assets_upload_error = "Upload finished without creating a file";
         }
     }
 }
@@ -2935,10 +3000,18 @@ void handle_assets_upload_post() {
     String html = "<!DOCTYPE html><html><head>";
     html += STYLE;
     html += "<title>Upload Complete</title></head><body><div class='container'>";
-    html += "<h3>Upload complete</h3>";
+    if (assets_upload_ok) {
+        html += "<h3>Upload complete</h3>";
+        if (assets_upload_filename.length() > 0) {
+            html += "<p>Saved as <code>" + assets_upload_filename + "</code> in <code>/assets</code>.</p>";
+        }
+    } else {
+        html += "<h3>Upload failed</h3>";
+        html += "<p>" + (assets_upload_error.length() > 0 ? assets_upload_error : String("Unknown upload failure")) + "</p>";
+    }
     html += "<p><a href='/assets'>Back to Assets</a></p>";
     html += "</div></body></html>";
-    config_server.send(200, "text/html", html);
+    config_server.send(assets_upload_ok ? 200 : 500, "text/html", html);
 }
 
 void handle_assets_delete() {

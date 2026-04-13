@@ -60,6 +60,8 @@ static int16_t current_lower_needle_angle = 0;
 // Global needle angle tracking for all screens (1-based: Screen1..Screen5)
 int16_t last_top_angle[6] = {0, 0, 0, 0, 0, 0};     // [screen] - all start at 0°
 int16_t last_bottom_angle[6] = {0, 180, 180, 180, 180, 180};  // [screen] - all start at 180°
+static lv_point_t g_top_needle_points[NUM_SCREENS][2];
+static lv_point_t g_bottom_needle_points[NUM_SCREENS][2];
 
 // Buzzer alert function is implemented in `src/ui_Settings.cpp`.
 // The stub was removed to avoid duplicate definitions.
@@ -84,8 +86,8 @@ static void needle_anim_cb(void * var, int32_t v) {
         else if (needle == ui_Needle5) { screen = 4; gauge = 0; }
 
         NeedleStyle s = get_needle_style(screen, gauge);
+        lv_point_t *points = g_top_needle_points[screen];
         float rad = (v - 90) * PI / 180.0f;
-        static lv_point_t points[2];
         points[0].x = s.cx + (int16_t)(s.inner * cos(rad));
         points[0].y = s.cy + (int16_t)(s.inner * sin(rad));
         points[1].x = s.cx + (int16_t)(s.outer * cos(rad));
@@ -107,8 +109,8 @@ static void lower_needle_anim_cb(void * var, int32_t v) {
         else if (needle == ui_Lower_Needle5) { screen = 4; gauge = 1; }
 
         NeedleStyle s = get_needle_style(screen, gauge);
+        lv_point_t *points = g_bottom_needle_points[screen];
         float rad = (v - 90) * PI / 180.0f;
-        static lv_point_t points[2];
         points[0].x = s.cx + (int16_t)(s.inner * cos(rad));
         points[0].y = s.cy + (int16_t)(s.inner * sin(rad));
         points[1].x = s.cx + (int16_t)(s.outer * cos(rad));
@@ -217,6 +219,51 @@ void initialize_needle_positions() {
     if (ui_Lower_Needle3) lower_needle_anim_cb(ui_Lower_Needle3, 180);
     if (ui_Lower_Needle4) lower_needle_anim_cb(ui_Lower_Needle4, 180);
     if (ui_Lower_Needle5) lower_needle_anim_cb(ui_Lower_Needle5, 180);
+}
+
+void refresh_all_needle_positions() {
+    for (int screen = 0; screen < NUM_SCREENS; ++screen) {
+        refresh_needle_position(screen, 0);
+        refresh_needle_position(screen, 1);
+    }
+}
+
+void refresh_needle_position(int screen, int gauge) {
+    if (screen < 0 || screen >= NUM_SCREENS || gauge < 0 || gauge > 1) {
+        return;
+    }
+
+    lv_obj_t *needle = NULL;
+    switch (screen) {
+        case 0:
+            needle = (gauge == 0) ? ui_Needle : ui_Lower_Needle;
+            break;
+        case 1:
+            needle = (gauge == 0) ? ui_Needle2 : ui_Lower_Needle2;
+            break;
+        case 2:
+            needle = (gauge == 0) ? ui_Needle3 : ui_Lower_Needle3;
+            break;
+        case 3:
+            needle = (gauge == 0) ? ui_Needle4 : ui_Lower_Needle4;
+            break;
+        case 4:
+            needle = (gauge == 0) ? ui_Needle5 : ui_Lower_Needle5;
+            break;
+        default:
+            return;
+    }
+
+    if (!needle) {
+        return;
+    }
+
+    const int cache_index = screen + 1;
+    if (gauge == 0) {
+        needle_anim_cb(needle, last_top_angle[cache_index]);
+    } else {
+        lower_needle_anim_cb(needle, last_bottom_angle[cache_index]);
+    }
 }
 
 // File-level tracking for number displays (moved out of function scope for external reset)
