@@ -32,6 +32,7 @@ bool test_mode = false;
 extern "C" {
 #endif
 void show_fallback_error_screen_if_needed();
+void lv_png_init(void);
 #ifdef __cplusplus
 }
 #endif
@@ -1282,6 +1283,10 @@ void setup() {
     }
 
     // Initialize RGB565 binary image decoder (fast loading, no PNG decode overhead)
+    lv_png_init();
+    Serial.println("PNG decoder initialized");
+    Serial.flush();
+
     rgb565_decoder_init();
     Serial.println("RGB565 decoder initialized");
     Serial.flush();

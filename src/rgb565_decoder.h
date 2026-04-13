@@ -10,4 +10,7 @@ void rgb565_decoder_init(void);
 // Call before WiFi starts so first-access SD reads don't race WiFi DMA.
 void rgb565_preload_file(const char* lv_path);
 
+// Clear cached RGB565 image data so updated assets with the same filename reload from SD.
+void rgb565_cache_clear(void);
+
 #endif // RGB565_DECODER_H

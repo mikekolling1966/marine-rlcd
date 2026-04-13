@@ -66,6 +66,20 @@ static bool cache_owns(const uint8_t* ptr) {
     }
     return false;
 }
+
+void rgb565_cache_clear(void)
+{
+    for (int i = 0; i < s_img_cache_cnt; i++) {
+        if (s_img_cache[i].data) {
+            heap_caps_free((void*)s_img_cache[i].data);
+            s_img_cache[i].data = nullptr;
+        }
+        s_img_cache[i].path[0] = '\0';
+        s_img_cache[i].size = 0;
+    }
+    s_img_cache_cnt = 0;
+    LV_LOG_INFO("rgb565 cache cleared");
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 static lv_res_t decoder_info(lv_img_decoder_t * decoder, const void * src, lv_img_header_t * header)

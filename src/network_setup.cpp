@@ -14,6 +14,7 @@
 #include "gauge_config.h"
 #include "screen_config_c_api.h"
 #include "ui_Settings.h"
+#include "rgb565_decoder.h"
 #include <FS.h>
 #include <SPIFFS.h>
 #include <SD_MMC.h>
@@ -279,6 +280,11 @@ unsigned long g_config_page_last_seen = 0;
 static std::vector<String> g_iconFiles;
 static std::vector<String> g_bgFiles;
 
+static bool is_supported_asset_upload(String filename) {
+    filename.toLowerCase();
+    return filename.endsWith(".png") || filename.endsWith(".bin");
+}
+
 static bool ensure_assets_dir() {
     if (SD_MMC.exists("/assets")) {
         return true;
@@ -319,8 +325,14 @@ static void scan_sd_assets() {
             String lname = fname;
             lname.toLowerCase();
             String fullPath = fname.startsWith("/assets/") ? fname : "/assets/" + fname;
-            if (lname.endsWith(".png"))      g_iconFiles.push_back(String("S:/") + fullPath);
-            else if (lname.endsWith(".bin")) g_bgFiles.push_back(String("S:/") + fullPath);
+            if (lname.endsWith(".png")) {
+                g_iconFiles.push_back(String("S:/") + fullPath);
+            }
+            else if (lname.endsWith(".bin")) {
+                String lvPath = String("S:/") + fullPath;
+                g_bgFiles.push_back(lvPath);
+                g_iconFiles.push_back(lvPath);  // allow reliable RGB565 icons as well
+            }
         }
     } else {
         // POSIX fallback
@@ -334,8 +346,14 @@ static void scan_sd_assets() {
                 String lname = sname; lname.toLowerCase();
                 if (lname.startsWith("_")) continue;
                 String fullPath = "/assets/" + sname;
-                if (lname.endsWith(".png"))      g_iconFiles.push_back(String("S:/") + fullPath);
-                else if (lname.endsWith(".bin")) g_bgFiles.push_back(String("S:/") + fullPath);
+                if (lname.endsWith(".png")) {
+                    g_iconFiles.push_back(String("S:/") + fullPath);
+                }
+                else if (lname.endsWith(".bin")) {
+                    String lvPath = String("S:/") + fullPath;
+                    g_bgFiles.push_back(lvPath);
+                    g_iconFiles.push_back(lvPath);  // allow reliable RGB565 icons as well
+                }
             }
             closedir(d);
         }
@@ -2893,7 +2911,7 @@ void handle_assets_page() {
     html += "<h2>Assets Manager</h2>";
     // Upload form (styled)
     html += "<div class='assets-uploader'><form method='POST' action='/assets/upload' enctype='multipart/form-data' style='display:flex;gap:8px;align-items:center;'>";
-    html += "<input type='file' name='file' accept='.png,.bin,image/png,image/jpeg,image/bmp,image/gif'>";
+    html += "<input type='file' name='file' accept='.png,.bin,image/png,application/octet-stream'>";
     html += "<input type='submit' value='Upload' class='tab-btn'>";
     html += "</form></div>";
     flush();
@@ -2912,8 +2930,13 @@ void handle_assets_page() {
         html += " <a href='S:" + sdpath + "' target='_blank' class='tab-btn' style='padding:6px 10px;text-decoration:none;'>Download</a></td></tr>";
         flush();
     };
-    for (const auto& f : g_bgFiles)   addRow(f);
-    for (const auto& f : g_iconFiles) addRow(f);
+    std::set<String> listed_assets;
+    for (const auto& f : g_bgFiles) {
+        if (listed_assets.insert(f).second) addRow(f);
+    }
+    for (const auto& f : g_iconFiles) {
+        if (listed_assets.insert(f).second) addRow(f);
+    }
     html += "</table>";
     html += "<p style='text-align:center; margin-top:12px;'><a href='/'>Back</a></p>";
     html += "</div></div></body></html>";
@@ -2928,12 +2951,16 @@ static FILE *assets_upload_fp = NULL;
 static bool assets_upload_ok = false;
 static String assets_upload_error;
 static String assets_upload_filename;
+static uint32_t assets_upload_bytes_written = 0;
+static uint32_t assets_upload_expected_bytes = 0;
 void handle_assets_upload() {
     HTTPUpload& upload = config_server.upload();
     if (upload.status == UPLOAD_FILE_START) {
         assets_upload_ok = false;
         assets_upload_error = "";
         assets_upload_filename = "";
+        assets_upload_bytes_written = 0;
+        assets_upload_expected_bytes = 0;
         assets_upload_file = File();
         if (assets_upload_fp) {
             fclose(assets_upload_fp);
@@ -2951,6 +2978,11 @@ void handle_assets_upload() {
             Serial.printf("[ASSETS] Upload rejected: %s\n", assets_upload_error.c_str());
             return;
         }
+        if (!is_supported_asset_upload(filename)) {
+            assets_upload_error = "Only .png and .bin assets are supported";
+            Serial.printf("[ASSETS] Upload rejected: %s (%s)\n", assets_upload_error.c_str(), filename.c_str());
+            return;
+        }
         if (!ensure_assets_dir()) {
             assets_upload_error = "Assets folder is unavailable on SD card";
             Serial.printf("[ASSETS] Upload rejected: %s\n", assets_upload_error.c_str());
@@ -2958,32 +2990,43 @@ void handle_assets_upload() {
         }
         String path = String("/assets/") + filename;
         Serial.printf("[ASSETS] Upload start: %s -> %s\n", upload.filename.c_str(), path.c_str());
+        if (SD_MMC.exists(path)) {
+            SD_MMC.remove(path);
+        }
+        String alt = String("/sdcard") + path;
+        remove(alt.c_str());
+
         // open file for write (overwrite)
         assets_upload_file = SD_MMC.open(path, FILE_WRITE);
         if (!assets_upload_file) {
             Serial.printf("[ASSETS] SD_MMC open failed for %s, trying POSIX fallback\n", path.c_str());
             // Try POSIX fopen on /sdcard prefix (SDSPI mount uses /sdcard)
-            String alt = String("/sdcard") + path;
             assets_upload_fp = fopen(alt.c_str(), "wb");
             if (!assets_upload_fp) {
                 Serial.printf("[ASSETS] POSIX fopen fallback failed for %s\n", alt.c_str());
                 assets_upload_error = "Could not open destination file on SD card";
             } else {
                 Serial.printf("[ASSETS] POSIX fopen fallback opened %s\n", alt.c_str());
-                assets_upload_ok = true;
             }
-        } else {
-            assets_upload_ok = true;
         }
     } else if (upload.status == UPLOAD_FILE_WRITE) {
         if (assets_upload_file) {
-            assets_upload_file.write(upload.buf, upload.currentSize);
+            size_t written = assets_upload_file.write(upload.buf, upload.currentSize);
+            assets_upload_bytes_written += (uint32_t)written;
+            if (written != upload.currentSize && assets_upload_error.length() == 0) {
+                assets_upload_error = "SD write failed during upload";
+            }
         } else if (assets_upload_fp) {
-            fwrite(upload.buf, 1, upload.currentSize, assets_upload_fp);
+            size_t written = fwrite(upload.buf, 1, upload.currentSize, assets_upload_fp);
+            assets_upload_bytes_written += (uint32_t)written;
+            if (written != upload.currentSize && assets_upload_error.length() == 0) {
+                assets_upload_error = "POSIX write failed during upload";
+            }
         } else if (assets_upload_error.length() == 0) {
             assets_upload_error = "Upload stream had no open destination";
         }
     } else if (upload.status == UPLOAD_FILE_END) {
+        assets_upload_expected_bytes = upload.totalSize;
         if (assets_upload_file) {
             assets_upload_file.flush();
             assets_upload_file.close();
@@ -2995,11 +3038,48 @@ void handle_assets_upload() {
         } else if (assets_upload_error.length() == 0) {
             assets_upload_error = "Upload finished without creating a file";
         }
+
+        if (assets_upload_error.length() == 0) {
+            if (assets_upload_bytes_written != assets_upload_expected_bytes) {
+                assets_upload_error = "Uploaded byte count did not match file size";
+            } else {
+                String path = String("/assets/") + assets_upload_filename;
+                bool verified = false;
+                size_t verified_size = 0;
+                File verify_file = SD_MMC.open(path, FILE_READ);
+                if (verify_file) {
+                    verified_size = (size_t)verify_file.size();
+                    verify_file.close();
+                    verified = (verified_size == assets_upload_expected_bytes);
+                } else {
+                    String alt = String("/sdcard") + path;
+                    struct stat st;
+                    if (stat(alt.c_str(), &st) == 0) {
+                        verified_size = (size_t)st.st_size;
+                        verified = (verified_size == assets_upload_expected_bytes);
+                    }
+                }
+                if (!verified) {
+                    assets_upload_error = "Uploaded file could not be verified on SD card";
+                    Serial.printf("[ASSETS] Upload verify failed: %s expected=%u actual=%u\n",
+                                  path.c_str(),
+                                  (unsigned)assets_upload_expected_bytes,
+                                  (unsigned)verified_size);
+                } else {
+                    assets_upload_ok = true;
+                    Serial.printf("[ASSETS] Upload verified: %s (%u bytes)\n",
+                                  path.c_str(),
+                                  (unsigned)verified_size);
+                }
+            }
+        }
     }
 }
 
 // Final POST handler after upload completes (redirect back)
 void handle_assets_upload_post() {
+    rgb565_cache_clear();
+    lv_img_cache_invalidate_src(NULL);
     scan_sd_assets(); // refresh cached file list after new upload
     String html = "<!DOCTYPE html><html><head>";
     html += STYLE;
@@ -3030,6 +3110,8 @@ void handle_assets_delete() {
     if (SD_MMC.exists(path)) {
         bool ok = SD_MMC.remove(path);
         Serial.printf("[ASSETS] Delete %s -> %d\n", path.c_str(), ok);
+        rgb565_cache_clear();
+        lv_img_cache_invalidate_src(NULL);
         scan_sd_assets(); // refresh cached file list after delete
     }
     // redirect back
