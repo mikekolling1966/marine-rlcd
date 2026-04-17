@@ -55,6 +55,7 @@ bool     g_screen_is_off      = false;
 uint32_t g_last_activity_ms   = 0;   // updated on touch; also used by LVGL_Driver
 
 static constexpr int kKeyButtonGpio = 18;
+static constexpr int kBootButtonGpio = 0;
 static constexpr uint32_t kKeyButtonDebounceMs = 30;
 static constexpr uint32_t kKeyButtonLongPressMs = 700;
 static constexpr uint32_t kKeyButtonDoublePressMs = 350;
@@ -1055,59 +1056,115 @@ static void handle_key_double_press() {
     Serial.println("[KEY] Open settings");
 }
 
-static void handle_key_button() {
-    static bool last_raw_pressed = false;
-    static bool stable_pressed = false;
-    static uint32_t last_change_ms = 0;
-    static uint32_t press_start_ms = 0;
-    static bool long_press_handled = false;
-    static bool short_press_pending = false;
-    static uint32_t short_press_deadline_ms = 0;
+struct ButtonState {
+    const char *label;
+    int gpio;
+    bool initialised;
+    bool last_raw_level;
+    bool stable_level;
+    uint32_t last_change_ms;
+    uint32_t pulse_start_ms;
+    bool pulse_in_progress;
+    bool long_press_handled;
+    bool short_press_pending;
+    uint32_t short_press_deadline_ms;
+};
 
-    const bool raw_pressed = (digitalRead(kKeyButtonGpio) == LOW);
+static ButtonState g_key_button_state = {
+    .label = "KEY",
+    .gpio = kKeyButtonGpio,
+    .initialised = false,
+    .last_raw_level = true,
+    .stable_level = true,
+    .last_change_ms = 0,
+    .pulse_start_ms = 0,
+    .pulse_in_progress = false,
+    .long_press_handled = false,
+    .short_press_pending = false,
+    .short_press_deadline_ms = 0,
+};
+
+static ButtonState g_boot_button_state = {
+    .label = "BOOT",
+    .gpio = kBootButtonGpio,
+    .initialised = false,
+    .last_raw_level = true,
+    .stable_level = true,
+    .last_change_ms = 0,
+    .pulse_start_ms = 0,
+    .pulse_in_progress = false,
+    .long_press_handled = false,
+    .short_press_pending = false,
+    .short_press_deadline_ms = 0,
+};
+
+static void handle_button_input(ButtonState &button) {
+    const bool raw_level = (digitalRead(button.gpio) != 0);
     const uint32_t now_ms = millis();
 
-    if (raw_pressed != last_raw_pressed) {
-        last_raw_pressed = raw_pressed;
-        last_change_ms = now_ms;
-    }
-
-    if ((now_ms - last_change_ms) < kKeyButtonDebounceMs) {
+    if (!button.initialised) {
+        button.initialised = true;
+        button.last_raw_level = raw_level;
+        button.stable_level = raw_level;
+        button.last_change_ms = now_ms;
+        Serial.printf("[%s] GPIO%d initial level=%d\n",
+                      button.label, button.gpio, raw_level ? 1 : 0);
         return;
     }
 
-    if (raw_pressed == stable_pressed) {
-        if (stable_pressed && !long_press_handled &&
-            (now_ms - press_start_ms >= kKeyButtonLongPressMs)) {
-            long_press_handled = true;
-            short_press_pending = false;
+    if (raw_level != button.last_raw_level) {
+        button.last_raw_level = raw_level;
+        button.last_change_ms = now_ms;
+        return;
+    }
+
+    if ((now_ms - button.last_change_ms) < kKeyButtonDebounceMs) {
+        return;
+    }
+
+    if (raw_level == button.stable_level) {
+        if (button.pulse_in_progress && !button.long_press_handled &&
+            (now_ms - button.pulse_start_ms >= kKeyButtonLongPressMs)) {
+            button.long_press_handled = true;
+            button.short_press_pending = false;
             handle_key_long_press();
-        } else if (!stable_pressed && short_press_pending &&
-                   (int32_t)(now_ms - short_press_deadline_ms) >= 0) {
-            short_press_pending = false;
+        } else if (!button.pulse_in_progress && button.short_press_pending &&
+                   (int32_t)(now_ms - button.short_press_deadline_ms) >= 0) {
+            button.short_press_pending = false;
             handle_key_short_press();
         }
         return;
     }
 
-    stable_pressed = raw_pressed;
-    if (stable_pressed) {
-        press_start_ms = now_ms;
-        long_press_handled = false;
+    button.stable_level = raw_level;
+    Serial.printf("[%s] GPIO%d stable level -> %d\n",
+                  button.label, button.gpio, button.stable_level ? 1 : 0);
+
+    if (!button.pulse_in_progress) {
+        button.pulse_in_progress = true;
+        button.pulse_start_ms = now_ms;
+        button.long_press_handled = false;
         return;
     }
 
-    if (long_press_handled) {
+    button.pulse_in_progress = false;
+    if (button.long_press_handled) {
         return;
     }
 
-    if (short_press_pending && (int32_t)(short_press_deadline_ms - now_ms) > 0) {
-        short_press_pending = false;
+    if (button.short_press_pending &&
+        (int32_t)(button.short_press_deadline_ms - now_ms) > 0) {
+        button.short_press_pending = false;
         handle_key_double_press();
     } else {
-        short_press_pending = true;
-        short_press_deadline_ms = now_ms + kKeyButtonDoublePressMs;
+        button.short_press_pending = true;
+        button.short_press_deadline_ms = now_ms + kKeyButtonDoublePressMs;
     }
+}
+
+static void handle_key_button() {
+    handle_button_input(g_key_button_state);
+    handle_button_input(g_boot_button_state);
 }
 
 void setup() {
@@ -1151,7 +1208,9 @@ void setup() {
     Serial.flush();
 
     pinMode(kKeyButtonGpio, INPUT_PULLUP);
+    pinMode(kBootButtonGpio, INPUT_PULLUP);
     Serial.printf("[KEY] GPIO%d configured for screen advance\n", kKeyButtonGpio);
+    Serial.printf("[BOOT] GPIO%d configured for screen advance fallback\n", kBootButtonGpio);
     Serial.flush();
 
     // Explicitly init NVS — the Arduino framework does this too, but repeat here
@@ -1238,12 +1297,17 @@ void setup() {
 
     // Stage 3: Full SD re-init now that the display has finished taking the SPI pins
     Serial.println("SD: now performing SD_MMC.begin('/sdcard', true) after display init");
-    if (SD_Init() == ESP_OK) {
+    const bool sd_ok = (SD_Init() == ESP_OK);
+    if (sd_ok) {
         Serial.println("SD_Init: success");
     } else {
         Serial.println("SD_Init: failed");
     }
-    Serial.println("SD card initialized");
+    if (sd_ok) {
+        Serial.println("SD card initialized");
+    } else {
+        Serial.println("SD card unavailable; continuing without SD-backed assets");
+    }
     Serial.flush();
     Serial.print("LCD initialized at ");
     Serial.print(ESP_PANEL_LCD_RGB_TIMING_FREQ_HZ / 1000000);  // MHz

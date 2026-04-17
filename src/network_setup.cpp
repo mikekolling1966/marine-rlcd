@@ -366,6 +366,8 @@ const char* SETTINGS_NAMESPACE = "settings";
 const char* PREF_NAMESPACE = "gaugeconfig";
 const char* SCREEN_OFF_TIMEOUT_KEY = "screen_off_to";
 const char* CONFIG_AP_SSID = "ESP32-SquareDisplay";
+const char* FALLBACK_WIFI_SSID = "MNX_SYSTEMS";
+const char* FALLBACK_WIFI_PASSWORD = "broomcrown37??";
 // Blanked out — these previously matched the user's actual WiFi credentials,
 // causing the cleanup code below to wipe valid creds from NVS on every boot.
 const char* LEGACY_DEFAULT_SSID = "";
@@ -651,6 +653,37 @@ static bool start_config_ap() {
     Serial.print("AP IP: ");
     Serial.println(WiFi.softAPIP());
     return ap_ok;
+}
+
+static bool connect_to_wifi_network(const String& ssid, const String& password, const char* label) {
+    if (ssid.length() == 0) return false;
+
+    WiFi.disconnect(true, true);
+    delay(150);
+    WiFi.mode(WIFI_STA);
+    delay(150);
+    WiFi.begin(ssid.c_str(), password.c_str());
+
+    Serial.printf("[WiFi] Attempting %s: %s\n", label, ssid.c_str());
+    Serial.print("Connecting to WiFi");
+
+    int tries = 0;
+    while (WiFi.status() != WL_CONNECTED && tries < 30) {
+        delay(500);
+        Serial.print(".");
+        tries++;
+        // Silence buzzer during WiFi wait — setup() may have left BEE_EN/PIN6
+        // HIGH if the I2C expander direction write failed after a crash-reboot.
+        if (is_board_v4()) {
+            Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (PIN_BEE_EN - 1)));
+            Mode_EXIO(PIN_BEE_EN, 1);
+        } else {
+            Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
+            Mode_EXIOS(0x00);
+        }
+    }
+    Serial.println();
+    return WiFi.status() == WL_CONNECTED;
 }
 
 // Load preferences and screen configs from NVS or SD fallback
@@ -2540,29 +2573,26 @@ void setup_network() {
         WiFi.setHostname(saved_hostname.c_str());
         Serial.println("[WiFi] Hostname set to: " + saved_hostname);
     }
+    bool wifi_connected = false;
     if (saved_ssid.length() > 0) {
-        Serial.println("[WiFi] Attempting saved network: " + saved_ssid);
-        WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
-        Serial.print("Connecting to WiFi");
-        int tries = 0;
-        while (WiFi.status() != WL_CONNECTED && tries < 30) {
-            delay(500);
-            Serial.print(".");
-            tries++;
-            // Silence buzzer during WiFi wait — setup() may have left BEE_EN/PIN6
-            // HIGH if the I2C expander direction write failed after a crash-reboot.
-            if (is_board_v4()) {
-                Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (PIN_BEE_EN - 1)));
-                Mode_EXIO(PIN_BEE_EN, 1);
-            } else {
-                Set_EXIOS(Read_EXIOS(exio_output_reg()) & (uint8_t)~(1 << (EXIO_PIN6 - 1)));
-                Mode_EXIOS(0x00);
+        wifi_connected = connect_to_wifi_network(saved_ssid, saved_password, "saved network");
+    } else {
+        Serial.println("[WiFi] No saved SSID found; trying fallback network before AP mode");
+    }
+
+    if (!wifi_connected) {
+        String fallback_ssid = FALLBACK_WIFI_SSID;
+        bool fallback_is_same = saved_ssid.equals(fallback_ssid);
+        if (!fallback_is_same && fallback_ssid.length() > 0) {
+            wifi_connected = connect_to_wifi_network(fallback_ssid, FALLBACK_WIFI_PASSWORD, "fallback network");
+            if (wifi_connected) {
+                saved_ssid = fallback_ssid;
+                saved_password = FALLBACK_WIFI_PASSWORD;
+                Serial.println("[WiFi] Connected using fallback credentials");
             }
         }
-    } else {
-        Serial.println("[WiFi] No saved SSID found; starting AP mode");
     }
-    if (WiFi.status() == WL_CONNECTED) {
+    if (wifi_connected || WiFi.status() == WL_CONNECTED) {
         // Disable power-save so the radio stays awake between loop() calls.
         WiFi.setSleep(false);
         Serial.println("\nWiFi connected!");

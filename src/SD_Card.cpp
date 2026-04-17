@@ -32,6 +32,22 @@ char LastFoundAssetPath[128] = {0};
 // Pointer to mounted sdmmc card used by monitor/unmount helpers
 static sdmmc_card_t *s_sd_card = NULL;
 
+static const char *sd_card_type_name(sdcard_type_t type) {
+  switch (type) {
+    case CARD_MMC:
+      return "MMC";
+    case CARD_SD:
+      return "SDSC";
+    case CARD_SDHC:
+      return "SDHC";
+    case CARD_UNKNOWN:
+      return "UNKNOWN";
+    case CARD_NONE:
+    default:
+      return "NONE";
+  }
+}
+
 // helper: map a logical path to VFS path under /sdcard
 static void make_vfs_path(const char* in, char* out, size_t outlen) {
   if (!in || !out) return;
@@ -67,18 +83,49 @@ esp_err_t SD_Init() {
 
   // Do *not* perform SDSPI or pre-mount I2C writes here — match Arduino demo ordering.
   // Configure SDMMC pins and call SD_MMC.begin just like the Arduino demo.
+  // Weak internal pull-ups can sometimes help marginal boards long enough to
+  // determine whether the issue is pure signal integrity or a dead card/socket.
+  pinMode(SD_CLK_PIN, INPUT_PULLUP);
+  pinMode(SD_CMD_PIN, INPUT_PULLUP);
+  pinMode(SD_D0_PIN, INPUT_PULLUP);
   SD_MMC.setPins(SD_CLK_PIN, SD_CMD_PIN, SD_D0_PIN);
   vTaskDelay(pdMS_TO_TICKS(10));
 
   bool mounted = false;
-  for (int attempt = 1; attempt <= 5; attempt++) {
-    printf("SD_Init: attempt %d — calling SD_MMC.begin('/sdcard', true)\n", attempt);
-    if (SD_MMC.begin("/sdcard", true)) {
-      printf("SD_Init: SD_MMC begin succeeded on attempt %d\n", attempt);
+  // Some RLCD boards will mount happily at 40 MHz and then start throwing
+  // 0x107 read errors once the UI begins streaming larger assets. Prefer a
+  // more conservative clock first so we optimize for stable runtime reads,
+  // not just successful mount.
+  const int frequencies_khz[] = {
+    10000,
+    5000,
+    SDMMC_FREQ_PROBING,
+  };
+  const size_t frequency_count = sizeof(frequencies_khz) / sizeof(frequencies_khz[0]);
+  for (size_t i = 0; i < frequency_count; ++i) {
+    const int freq_khz = frequencies_khz[i];
+    const int attempt = static_cast<int>(i) + 1;
+    printf("SD_Init: attempt %d — calling SD_MMC.begin('/sdcard', true, false, %d kHz)\n",
+           attempt, freq_khz);
+    if (SD_MMC.begin("/sdcard", true, false, freq_khz)) {
+      const sdcard_type_t type = SD_MMC.cardType();
+      if (type == CARD_NONE) {
+        printf("SD_Init: mount returned success but cardType() is NONE at %d kHz; retrying\n",
+               freq_khz);
+        SD_MMC.end();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        continue;
+      }
+      printf("SD_Init: SD_MMC begin succeeded on attempt %d at %d kHz (type=%s)\n",
+             attempt, freq_khz, sd_card_type_name(type));
+      const uint64_t card_size_mb = SD_MMC.cardSize() / (1024ULL * 1024ULL);
+      if (card_size_mb > 0) {
+        printf("SD_Init: card size = %llu MB\n", card_size_mb);
+      }
       mounted = true;
       break;
     }
-    printf("SD_Init: attempt %d failed, retrying...\n", attempt);
+    printf("SD_Init: attempt %d failed at %d kHz, retrying...\n", attempt, freq_khz);
     SD_MMC.end();
     vTaskDelay(pdMS_TO_TICKS(200));
   }
